@@ -50,6 +50,15 @@ object RunAnywhereBridge {
             logger.info("Loading native library 'runanywhere_jni'...")
 
             try {
+                // Load libc++_shared.so first (required by librac_commons.so)
+                try {
+                    System.loadLibrary("c++_shared")
+                    logger.debug("libc++_shared.so loaded")
+                } catch (e: UnsatisfiedLinkError) {
+                    logger.warn("libc++_shared.so not found (may be statically linked): ${e.message}")
+                    // Continue - some builds may have c++ statically linked
+                }
+                
                 System.loadLibrary("runanywhere_jni")
                 nativeLibraryLoaded = true
                 logger.info("✅ Native library loaded successfully")

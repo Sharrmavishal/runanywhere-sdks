@@ -140,10 +140,19 @@ class RunAnywhereApplication : Application() {
 
             // Phase 2: Complete services initialization (device registration, etc.)
             // This triggers device registration with the backend
-            kotlinx.coroutines.runBlocking {
-                RunAnywhere.completeServicesInitialization()
+            // Note: Wrapped in try-catch for version compatibility (v0.1.4 libraries may not have all functions)
+            try {
+                kotlinx.coroutines.runBlocking {
+                    RunAnywhere.completeServicesInitialization()
+                }
+                Log.i("RunAnywhereApp", "✅ SDK services initialization complete (device registered)")
+            } catch (e: UnsatisfiedLinkError) {
+                Log.w("RunAnywhereApp", "⚠️ Services initialization skipped (version mismatch): ${e.message}")
+                Log.i("RunAnywhereApp", "✅ SDK initialized without services (local inference only)")
+            } catch (e: Exception) {
+                Log.w("RunAnywhereApp", "⚠️ Services initialization failed: ${e.message}")
+                Log.i("RunAnywhereApp", "✅ SDK initialized without services (local inference only)")
             }
-            Log.i("RunAnywhereApp", "✅ SDK services initialization complete (device registered)")
         } catch (e: Exception) {
             // Log the failure but continue
             Log.w("RunAnywhereApp", "⚠️ SDK initialization failed (backend may be unavailable): ${e.message}")
@@ -157,9 +166,15 @@ class RunAnywhereApplication : Application() {
                 )
                 Log.i("RunAnywhereApp", "✅ SDK initialized in OFFLINE mode (local models only)")
 
-                // Still try Phase 2 in offline mode
-                kotlinx.coroutines.runBlocking {
-                    RunAnywhere.completeServicesInitialization()
+                // Still try Phase 2 in offline mode (wrapped for version compatibility)
+                try {
+                    kotlinx.coroutines.runBlocking {
+                        RunAnywhere.completeServicesInitialization()
+                    }
+                } catch (e: UnsatisfiedLinkError) {
+                    Log.w("RunAnywhereApp", "⚠️ Services initialization skipped (version mismatch): ${e.message}")
+                } catch (e: Exception) {
+                    Log.w("RunAnywhereApp", "⚠️ Services initialization failed: ${e.message}")
                 }
             } catch (fallbackError: Exception) {
                 Log.e("RunAnywhereApp", "❌ Fallback initialization also failed: ${fallbackError.message}")
@@ -225,11 +240,26 @@ class RunAnywhereApplication : Application() {
 
         // Register backends first (matching iOS pattern)
         // These call the C++ rac_backend_xxx_register() functions via JNI
-        Log.i("RunAnywhereApp", "🔧 Registering LlamaCPP backend...")
-        LlamaCPP.register(priority = 100)
+        // Wrapped in try-catch for version compatibility
+        try {
+            Log.i("RunAnywhereApp", "🔧 Registering LlamaCPP backend...")
+            LlamaCPP.register(priority = 100)
+            Log.i("RunAnywhereApp", "✅ LlamaCPP backend registered")
+        } catch (e: UnsatisfiedLinkError) {
+            Log.w("RunAnywhereApp", "⚠️ LlamaCPP backend registration failed (missing native libs): ${e.message}")
+        } catch (e: Exception) {
+            Log.w("RunAnywhereApp", "⚠️ LlamaCPP backend registration failed: ${e.message}")
+        }
 
-        Log.i("RunAnywhereApp", "🔧 Registering ONNX backend...")
-        ONNX.register(priority = 100)
+        try {
+            Log.i("RunAnywhereApp", "🔧 Registering ONNX backend...")
+            ONNX.register(priority = 100)
+            Log.i("RunAnywhereApp", "✅ ONNX backend registered")
+        } catch (e: UnsatisfiedLinkError) {
+            Log.w("RunAnywhereApp", "⚠️ ONNX backend registration failed (missing native libs): ${e.message}")
+        } catch (e: Exception) {
+            Log.w("RunAnywhereApp", "⚠️ ONNX backend registration failed: ${e.message}")
+        }
 
         Log.i("RunAnywhereApp", "✅ Backends registered, now registering models...")
 
