@@ -13,6 +13,7 @@ import com.runanywhere.sdk.public.SDKEnvironment
 import com.runanywhere.sdk.public.extensions.Models.ModelCategory
 import com.runanywhere.sdk.public.extensions.registerModel
 import com.runanywhere.sdk.storage.AndroidPlatformContext
+import com.runanywhere.runanywhereai.http.InferenceHttpServer
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -54,6 +55,11 @@ class RunAnywhereApplication : Application() {
      */
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.Main)
 
+    /**
+     * HTTP server for exposing inference via REST API (PoC)
+     */
+    private val httpServer = InferenceHttpServer(port = 8080)
+
     @Volatile
     private var isSDKInitialized = false
 
@@ -88,6 +94,8 @@ class RunAnywhereApplication : Application() {
     }
 
     override fun onTerminate() {
+        // Stop HTTP server
+        httpServer.stop()
         // Cancel all coroutines when app terminates
         applicationScope.cancel()
         super.onTerminate()
@@ -238,6 +246,12 @@ class RunAnywhereApplication : Application() {
             // SDK reported not initialized but no error - treat as ready for offline mode
             _initializationState.value = SDKInitializationState.Ready
             Log.i("RunAnywhereApp", "🎉 App is ready to use (offline mode)!")
+        }
+
+        // Start HTTP server for remote inference access (PoC)
+        if (isSDKInitialized) {
+            Log.i("RunAnywhereApp", "🌐 Starting HTTP server for remote inference...")
+            httpServer.start()
         }
     }
 

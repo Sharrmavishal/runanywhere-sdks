@@ -141,7 +141,10 @@ android {
                     "META-INF/kotlin/**",
                     "META-INF/*.kotlin_module",
                     "META-INF/INDEX.LIST",
+                    "META-INF/io.netty.versions.properties", // Fix duplicate Netty version files
                 )
+            // Merge duplicate Netty version properties
+            merges += listOf("META-INF/io.netty.versions.properties")
         }
 
         jniLibs {
@@ -285,6 +288,14 @@ dependencies {
     implementation(libs.retrofit)
     implementation(libs.retrofit.gson)
     implementation(libs.gson)
+
+    // ========================================
+    // Ktor Server (for HTTP wrapper PoC)
+    // ========================================
+    implementation("io.ktor:ktor-server-core:${libs.versions.ktor.get()}")
+    implementation("io.ktor:ktor-server-netty:${libs.versions.ktor.get()}")
+    implementation("io.ktor:ktor-server-content-negotiation:${libs.versions.ktor.get()}")
+    implementation("io.ktor:ktor-serialization-kotlinx-json:${libs.versions.ktor.get()}")
 
     // ========================================
     // File Management & Storage

@@ -23,7 +23,7 @@
         android:supportsRtl="true"
         android:theme="@style/Theme.RunAnywhereAI"
         android:largeHeap="true"
-        android:usesCleartextTraffic="false"
+        android:usesCleartextTraffic="true"
         tools:targetApi="35">
 
         <!-- 16KB page size support for Android 15+
