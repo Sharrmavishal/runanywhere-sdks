@@ -282,28 +282,180 @@ object CppBridgeModelAssignment {
     }
 
     /**
+     * Callback object for C++ model assignment API.
+     * Methods are called from JNI.
+     */
+    private val nativeCallbackHandler = object {
+        /**
+         * HTTP GET callback for model assignments.
+         * @param endpoint API endpoint path (e.g., "/api/v1/model-assignments/for-sdk")
+         * @param requiresAuth Whether auth header is required
+         * @return JSON response or "ERROR:message" on failure
+         */
+        @Suppress("unused") // Called from JNI
+        fun httpGet(endpoint: String, requiresAuth: Boolean): String {
+            return try {
+                // Get base URL from telemetry config or use default
+                val baseUrl = CppBridgeTelemetry.getBaseUrl()
+                    ?: "https://api.runanywhere.ai"
+                val fullUrl = "$baseUrl$endpoint"
+
+                CppBridgePlatformAdapter.logCallback(
+                    CppBridgePlatformAdapter.LogLevel.INFO,
+                    TAG,
+                    ">>> Model assignment HTTP GET to: $fullUrl (requiresAuth: $requiresAuth)",
+                )
+                CppBridgePlatformAdapter.logCallback(
+                    CppBridgePlatformAdapter.LogLevel.INFO,
+                    TAG,
+                    ">>> Base URL: $baseUrl, Endpoint: $endpoint",
+                )
+
+                // Build headers - matching Swift SDK's HTTPService.defaultHeaders
+                val headers = mutableMapOf<String, String>()
+                headers["Accept"] = "application/json"
+                headers["Content-Type"] = "application/json"
+                headers["X-SDK-Client"] = "RunAnywhereSDK"
+                headers["X-SDK-Version"] = com.runanywhere.sdk.utils.SDKConstants.SDK_VERSION
+                headers["X-Platform"] = "android"
+
+                if (requiresAuth) {
+                    // Get access token from auth manager
+                    CppBridgePlatformAdapter.logCallback(
+                        CppBridgePlatformAdapter.LogLevel.INFO,
+                        TAG,
+                        "Auth state - isAuthenticated: ${CppBridgeAuth.isAuthenticated}, tokenNeedsRefresh: ${CppBridgeAuth.tokenNeedsRefresh}",
+                    )
+                    val accessToken = CppBridgeAuth.getValidToken()
+                    if (!accessToken.isNullOrEmpty()) {
+                        headers["Authorization"] = "Bearer $accessToken"
+                        CppBridgePlatformAdapter.logCallback(
+                            CppBridgePlatformAdapter.LogLevel.INFO,
+                            TAG,
+                            "Added Authorization header (token length: ${accessToken.length})",
+                        )
+                    } else {
+                        // Fallback to API key if no OAuth token available
+                        // This mirrors Swift SDK's HTTPService.resolveToken() behavior
+                        val apiKey = CppBridgeTelemetry.getApiKey()
+                        if (!apiKey.isNullOrEmpty()) {
+                            headers["Authorization"] = "Bearer $apiKey"
+                            CppBridgePlatformAdapter.logCallback(
+                                CppBridgePlatformAdapter.LogLevel.INFO,
+                                TAG,
+                                "No OAuth token available, falling back to API key authentication (key length: ${apiKey.length})",
+                            )
+                        } else {
+                            CppBridgePlatformAdapter.logCallback(
+                                CppBridgePlatformAdapter.LogLevel.ERROR,
+                                TAG,
+                                "⚠️ No access token or API key available for authenticated request! Model assignments will likely fail.",
+                            )
+                        }
+                    }
+                }
+
+                // Make HTTP request
+                val response = CppBridgeHTTP.get(fullUrl, headers)
+
+                CppBridgePlatformAdapter.logCallback(
+                    CppBridgePlatformAdapter.LogLevel.INFO,
+                    TAG,
+                    "<<< Model assignment response: status=${response.statusCode}, success=${response.success}, bodyLen=${response.body?.length ?: 0}",
+                )
+                
+                // Log full response body for debugging
+                CppBridgePlatformAdapter.logCallback(
+                    CppBridgePlatformAdapter.LogLevel.INFO,
+                    TAG,
+                    "<<< Full response body: ${response.body ?: "null"}",
+                )
+
+                if (response.success && response.body != null) {
+                    CppBridgePlatformAdapter.logCallback(
+                        CppBridgePlatformAdapter.LogLevel.INFO,
+                        TAG,
+                        "Model assignments fetched successfully: ${response.body.take(500)}",
+                    )
+                    response.body
+                } else {
+                    val errorMsg = response.errorMessage ?: "HTTP ${response.statusCode}"
+                    CppBridgePlatformAdapter.logCallback(
+                        CppBridgePlatformAdapter.LogLevel.ERROR,
+                        TAG,
+                        "HTTP GET failed: $errorMsg",
+                    )
+                    "ERROR:$errorMsg"
+                }
+            } catch (e: Exception) {
+                CppBridgePlatformAdapter.logCallback(
+                    CppBridgePlatformAdapter.LogLevel.ERROR,
+                    TAG,
+                    "HTTP GET exception: ${e.message}",
+                )
+                "ERROR:${e.message}"
+            }
+        }
+    }
+
+    /**
      * Register the model assignment callbacks with C++ core.
      *
      * This must be called during SDK initialization, after [CppBridgeModelRegistry.register].
      * It is safe to call multiple times; subsequent calls are no-ops.
+     *
+     * @param autoFetch Whether to auto-fetch models after registration.
+     *                  Should be false for development mode, true for staging/production.
+     * @return true if registration succeeded, false otherwise
      */
-    fun register() {
+    fun register(autoFetch: Boolean = false): Boolean {
         synchronized(lock) {
             if (isRegistered) {
-                return
+                CppBridgePlatformAdapter.logCallback(
+                    CppBridgePlatformAdapter.LogLevel.DEBUG,
+                    TAG,
+                    "Model assignment callbacks already registered, skipping",
+                )
+                return true
             }
 
             // Register the model assignment callbacks with C++ via JNI
-            // TODO: Call native registration
-            // nativeSetModelAssignmentCallbacks()
+            // auto_fetch controls whether models are fetched immediately after registration
+            try {
+                CppBridgePlatformAdapter.logCallback(
+                    CppBridgePlatformAdapter.LogLevel.INFO,
+                    TAG,
+                    "Registering model assignment callbacks with C++ (autoFetch: $autoFetch)...",
+                )
 
-            isRegistered = true
+                val result = com.runanywhere.sdk.native.bridge.RunAnywhereBridge
+                    .racModelAssignmentSetCallbacks(nativeCallbackHandler, autoFetch)
 
-            CppBridgePlatformAdapter.logCallback(
-                CppBridgePlatformAdapter.LogLevel.DEBUG,
-                TAG,
-                "Model assignment callbacks registered",
-            )
+                if (result == 0) { // RAC_SUCCESS
+                    isRegistered = true
+                    CppBridgePlatformAdapter.logCallback(
+                        CppBridgePlatformAdapter.LogLevel.INFO,
+                        TAG,
+                        "✅ Model assignment callbacks registered successfully (autoFetch: $autoFetch)",
+                    )
+                    return true
+                } else {
+                    CppBridgePlatformAdapter.logCallback(
+                        CppBridgePlatformAdapter.LogLevel.ERROR,
+                        TAG,
+                        "❌ Failed to register model assignment callbacks: error code $result " +
+                            "(RAC_ERROR_INVALID_ARGUMENT=-201, RAC_ERROR_INVALID_STATE=-231)",
+                    )
+                    return false
+                }
+            } catch (e: Exception) {
+                CppBridgePlatformAdapter.logCallback(
+                    CppBridgePlatformAdapter.LogLevel.ERROR,
+                    TAG,
+                    "❌ Exception registering model assignment callbacks: ${e.message}",
+                )
+                return false
+            }
         }
     }
 
@@ -802,13 +954,69 @@ object CppBridgeModelAssignment {
                 return
             }
 
-            // TODO: Call native unregistration
-            // nativeUnsetModelAssignmentCallbacks()
+            // Clear callbacks by calling with null
+            try {
+                com.runanywhere.sdk.native.bridge.RunAnywhereBridge
+                    .racModelAssignmentSetCallbacks(Unit, false)
+            } catch (e: Exception) {
+                // Ignore errors during shutdown
+            }
 
             assignmentListener = null
             assignmentProvider = null
             assignments.clear()
             isRegistered = false
+        }
+    }
+
+    // ========================================================================
+    // PUBLIC FETCH API
+    // ========================================================================
+
+    /**
+     * Fetch model assignments from the backend.
+     *
+     * This fetches models assigned to this device based on device type and platform.
+     * Results are cached and saved to the model registry.
+     *
+     * @param forceRefresh If true, bypass cache and fetch fresh data
+     * @return JSON string of model assignments, or empty array on error
+     */
+    fun fetchModelAssignments(forceRefresh: Boolean = false): String {
+        // Check if callbacks are registered before attempting fetch
+        if (!isRegistered) {
+            CppBridgePlatformAdapter.logCallback(
+                CppBridgePlatformAdapter.LogLevel.ERROR,
+                TAG,
+                "❌ Cannot fetch model assignments: callbacks not registered. " +
+                    "Call register() first before fetchModelAssignments().",
+            )
+            return "[]"
+        }
+
+        return try {
+            CppBridgePlatformAdapter.logCallback(
+                CppBridgePlatformAdapter.LogLevel.INFO,
+                TAG,
+                ">>> Fetching model assignments from backend (forceRefresh: $forceRefresh)...",
+            )
+
+            val result = com.runanywhere.sdk.native.bridge.RunAnywhereBridge
+                .racModelAssignmentFetch(forceRefresh)
+
+            CppBridgePlatformAdapter.logCallback(
+                CppBridgePlatformAdapter.LogLevel.INFO,
+                TAG,
+                "<<< Fetched model assignments: ${result.take(200)}${if (result.length > 200) "..." else ""}",
+            )
+            result
+        } catch (e: Exception) {
+            CppBridgePlatformAdapter.logCallback(
+                CppBridgePlatformAdapter.LogLevel.ERROR,
+                TAG,
+                "❌ Failed to fetch model assignments: ${e.message}",
+            )
+            "[]"
         }
     }
 

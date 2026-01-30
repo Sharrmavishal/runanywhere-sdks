@@ -37,7 +37,7 @@ class _ChatInterfaceViewState extends State<ChatInterfaceView> {
   bool _isGenerating = false;
   bool _useStreaming = true;
   String? _errorMessage;
-  final bool _isLoading = false;
+  bool _isLoading = false;
 
   // Model state (from SDK - matches Swift pattern)
   String? _loadedModelName;
@@ -117,6 +117,7 @@ class _ChatInterfaceViewState extends State<ChatInterfaceView> {
           prefs.getDouble(PreferenceKeys.defaultTemperature) ?? 0.7;
       final maxTokens = prefs.getInt(PreferenceKeys.defaultMaxTokens) ?? 500;
 
+      // Streaming now runs in a background isolate, so no ANR concerns
       final options = sdk.LLMGenerationOptions(
         maxTokens: maxTokens,
         temperature: temperature,

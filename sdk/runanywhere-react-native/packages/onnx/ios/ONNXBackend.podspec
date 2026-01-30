@@ -9,10 +9,10 @@ CORE_VERSION = "0.1.4"
 ONNXRUNTIME_VERSION = "1.17.1"
 
 # =============================================================================
-# Binary Source - RABackendONNX from runanywhere-binaries
+# Binary Source - RABackendONNX from runanywhere-sdks
 # =============================================================================
 GITHUB_ORG = "RunanywhereAI"
-CORE_REPO = "runanywhere-binaries"
+CORE_REPO = "runanywhere-sdks"
 
 # =============================================================================
 # testLocal Toggle
@@ -34,7 +34,7 @@ Pod::Spec.new do |s|
 
   # =============================================================================
   # ONNX Backend - RABackendONNX + ONNX Runtime
-  # Downloads from runanywhere-binaries (NOT runanywhere-sdks)
+  # Downloads from runanywhere-sdks (NOT runanywhere-sdks)
   # =============================================================================
   if TEST_LOCAL
     puts "[ONNXBackend] Using LOCAL RABackendONNX from Frameworks/"
@@ -68,7 +68,7 @@ Pod::Spec.new do |s|
       mkdir -p "$FRAMEWORK_DIR"
       rm -rf "$FRAMEWORK_DIR/RABackendONNX.xcframework"
 
-      # Download RABackendONNX from runanywhere-binaries
+      # Download RABackendONNX from runanywhere-sdks
       DOWNLOAD_URL="https://github.com/#{GITHUB_ORG}/#{CORE_REPO}/releases/download/core-v$VERSION/RABackendONNX-ios-v$VERSION.zip"
       ZIP_FILE="/tmp/RABackendONNX.zip"
 
@@ -128,10 +128,10 @@ Pod::Spec.new do |s|
     "HEADER_SEARCH_PATHS" => [
       "$(PODS_TARGET_SRCROOT)/../cpp",
       "$(PODS_TARGET_SRCROOT)/../cpp/bridges",
-      "$(PODS_TARGET_SRCROOT)/Frameworks/RABackendONNX.xcframework/ios-arm64/Headers",
-      "$(PODS_TARGET_SRCROOT)/Frameworks/RABackendONNX.xcframework/ios-arm64_x86_64-simulator/Headers",
-      "$(PODS_TARGET_SRCROOT)/Frameworks/onnxruntime.xcframework/ios-arm64/Headers",
-      "$(PODS_TARGET_SRCROOT)/Frameworks/onnxruntime.xcframework/ios-arm64_x86_64-simulator/Headers",
+      "$(PODS_TARGET_SRCROOT)/Frameworks/RABackendONNX.xcframework/ios-arm64/RABackendONNX.framework/Headers",
+      "$(PODS_TARGET_SRCROOT)/Frameworks/RABackendONNX.xcframework/ios-arm64_x86_64-simulator/RABackendONNX.framework/Headers",
+      "$(PODS_TARGET_SRCROOT)/Frameworks/onnxruntime.xcframework/ios-arm64/onnxruntime.framework/Headers",
+      "$(PODS_TARGET_SRCROOT)/Frameworks/onnxruntime.xcframework/ios-arm64_x86_64-simulator/onnxruntime.framework/Headers",
       "$(PODS_ROOT)/Headers/Public",
     ].join(" "),
     "GCC_PREPROCESSOR_DEFINITIONS" => "$(inherited) HAS_ONNX=1",

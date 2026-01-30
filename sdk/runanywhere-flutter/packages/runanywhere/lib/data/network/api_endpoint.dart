@@ -17,12 +17,20 @@ enum APIEndpoint {
   devDeviceRegistration,
   devAnalytics,
 
-  // Core endpoints
+  // Telemetry - Production/Staging
   telemetry,
+  // Telemetry - Development
+  devTelemetry,
+
+  // Core endpoints
   models,
   deviceInfo,
   generationHistory,
   userPreferences,
+  modelAssignments,
+
+  // Development-specific
+  devModelAssignments,
 }
 
 extension APIEndpointPath on APIEndpoint {
@@ -45,13 +53,18 @@ extension APIEndpointPath on APIEndpoint {
 
       // Device Management - Development (Supabase REST API format)
       case APIEndpoint.devDeviceRegistration:
-        return '/rest/v1/device_registrations';
+        return '/rest/v1/sdk_devices';
       case APIEndpoint.devAnalytics:
         return '/rest/v1/analytics_events';
 
-      // Core endpoints
+      // Telemetry - Production/Staging
       case APIEndpoint.telemetry:
         return '/api/v1/sdk/telemetry';
+      // Telemetry - Development (Supabase REST API format)
+      case APIEndpoint.devTelemetry:
+        return '/rest/v1/telemetry_events';
+
+      // Core endpoints
       case APIEndpoint.models:
         return '/api/v1/models';
       case APIEndpoint.deviceInfo:
@@ -60,23 +73,14 @@ extension APIEndpointPath on APIEndpoint {
         return '/api/v1/history';
       case APIEndpoint.userPreferences:
         return '/api/v1/preferences';
+      case APIEndpoint.modelAssignments:
+        return '/api/v1/model-assignments/for-sdk';
+
+      // Development-specific (Supabase REST API format)
+      case APIEndpoint.devModelAssignments:
+        return '/rest/v1/sdk_model_assignments';
     }
   }
-}
-
-/// Model assignments endpoint with query parameters.
-/// Separate because it requires runtime parameters.
-class ModelAssignmentsEndpoint {
-  final String deviceType;
-  final String platform;
-
-  const ModelAssignmentsEndpoint({
-    required this.deviceType,
-    required this.platform,
-  });
-
-  String get path =>
-      '/api/v1/model-assignments/for-sdk?device_type=$deviceType&platform=$platform';
 }
 
 // MARK: - Environment-Based Endpoint Selection
@@ -101,6 +105,28 @@ extension APIEndpointEnvironment on APIEndpoint {
       case SDKEnvironment.staging:
       case SDKEnvironment.production:
         return APIEndpoint.analytics;
+    }
+  }
+
+  /// Get the telemetry endpoint for the given environment.
+  static APIEndpoint telemetryEndpoint(SDKEnvironment environment) {
+    switch (environment) {
+      case SDKEnvironment.development:
+        return APIEndpoint.devTelemetry;
+      case SDKEnvironment.staging:
+      case SDKEnvironment.production:
+        return APIEndpoint.telemetry;
+    }
+  }
+
+  /// Get the model assignments endpoint for the given environment.
+  static APIEndpoint modelAssignmentsEndpoint(SDKEnvironment environment) {
+    switch (environment) {
+      case SDKEnvironment.development:
+        return APIEndpoint.devModelAssignments;
+      case SDKEnvironment.staging:
+      case SDKEnvironment.production:
+        return APIEndpoint.modelAssignments;
     }
   }
 }

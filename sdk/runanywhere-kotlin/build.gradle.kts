@@ -7,6 +7,7 @@ plugins {
     alias(libs.plugins.detekt)
     alias(libs.plugins.ktlint)
     id("maven-publish")
+    signing
 }
 
 // =============================================================================
@@ -39,17 +40,40 @@ ktlint {
     }
 }
 
-group = "com.runanywhere.sdk"
-version = "0.1.4"
+// Maven Central group ID - must match verified Sonatype namespace
+// Using io.github.sanchitmonga22 (verified) until com.runanywhere is verified
+// Once com.runanywhere is verified, change to: "com.runanywhere"
+val isJitPack = System.getenv("JITPACK") == "true"
+val usePendingNamespace = System.getenv("USE_RUNANYWHERE_NAMESPACE")?.toBoolean() ?: false
+group = when {
+    isJitPack -> "com.github.RunanywhereAI.runanywhere-sdks"
+    usePendingNamespace -> "com.runanywhere"  // Use after DNS verification completes
+    else -> "io.github.sanchitmonga22"  // Currently verified namespace
+}
+
+// Version resolution priority:
+// 1. SDK_VERSION env var (set by our CI/CD from git tag)
+// 2. VERSION env var (set by JitPack from git tag)
+// 3. Default fallback for local development
+val resolvedVersion = System.getenv("SDK_VERSION")?.removePrefix("v")
+    ?: System.getenv("VERSION")?.removePrefix("v")
+    ?: "0.1.5-SNAPSHOT"
+version = resolvedVersion
+
+// Log version for debugging
+logger.lifecycle("RunAnywhere SDK version: $resolvedVersion (JitPack=$isJitPack)")
 
 // =============================================================================
 // Local vs Remote JNI Library Configuration
 // =============================================================================
 // testLocal = true  → Use locally built JNI libs from src/androidMain/jniLibs/
-//                     Run: ./scripts/build-local.sh to build and copy libs
+//                     Run: ./scripts/build-kotlin.sh --setup for first-time setup
 //
 // testLocal = false → Download pre-built JNI libs from GitHub releases (default)
-//                     Downloads from: https://github.com/RunanywhereAI/runanywhere-binaries/releases
+//                     Downloads from: https://github.com/RunanywhereAI/runanywhere-sdks/releases
+//
+// rebuildCommons = true → Force rebuild of runanywhere-commons C++ code
+//                         Use when you've made changes to C++ source
 //
 // Mirrors Swift SDK's Package.swift testLocal pattern
 // =============================================================================
@@ -60,25 +84,31 @@ val testLocal: Boolean =
         ?: project.findProperty("runanywhere.testLocal")?.toString()?.toBoolean()
         ?: false
 
-// Version constants for remote downloads (mirrors Swift's Package.swift)
-// These should match the releases at:
-// - https://github.com/RunanywhereAI/runanywhere-binaries/releases (Android JNI libs for backends)
-// - https://github.com/RunanywhereAI/runanywhere-sdks/releases (Android JNI libs for commons)
-// IMPORTANT: Check rootProject first to support composite builds
-// Version defaults must match GitHub releases:
-// - Commons: https://github.com/RunanywhereAI/runanywhere-sdks/releases/tag/commons-v{commonsVersion}
-// - Backends: https://github.com/RunanywhereAI/runanywhere-binaries/releases/tag/core-v{coreVersion}
-val coreVersion: String =
-    rootProject.findProperty("runanywhere.coreVersion")?.toString()
-        ?: project.findProperty("runanywhere.coreVersion")?.toString()
-        ?: "0.1.4"
-val commonsVersion: String =
-    rootProject.findProperty("runanywhere.commonsVersion")?.toString()
-        ?: project.findProperty("runanywhere.commonsVersion")?.toString()
-        ?: "0.1.4"
+// Force rebuild of runanywhere-commons when true
+val rebuildCommons: Boolean =
+    rootProject.findProperty("runanywhere.rebuildCommons")?.toString()?.toBoolean()
+        ?: project.findProperty("runanywhere.rebuildCommons")?.toString()?.toBoolean()
+        ?: false
+
+// =============================================================================
+// Native Library Version for Downloads
+// =============================================================================
+// When testLocal=false, native libraries are downloaded from GitHub unified releases.
+// The native lib version should match the SDK version for consistency.
+// Format: https://github.com/RunanywhereAI/runanywhere-sdks/releases/tag/v{version}
+//
+// Assets per ABI:
+//   - RACommons-android-{abi}-v{version}.zip
+//   - RABackendLLAMACPP-android-{abi}-v{version}.zip
+//   - RABackendONNX-android-{abi}-v{version}.zip
+// =============================================================================
+val nativeLibVersion: String =
+    rootProject.findProperty("runanywhere.nativeLibVersion")?.toString()
+        ?: project.findProperty("runanywhere.nativeLibVersion")?.toString()
+        ?: resolvedVersion  // Default to SDK version
 
 // Log the build mode
-logger.lifecycle("RunAnywhere SDK: testLocal=$testLocal, coreVersion=$coreVersion")
+logger.lifecycle("RunAnywhere SDK: testLocal=$testLocal, nativeLibVersion=$nativeLibVersion")
 
 // =============================================================================
 // Project Path Resolution
@@ -133,6 +163,14 @@ kotlin {
 
     // Android target
     androidTarget {
+        // Enable publishing Android AAR to Maven
+        publishLibraryVariants("release")
+
+        // Set correct artifact ID for Android publication
+        mavenPublication {
+            artifactId = "runanywhere-sdk-android"
+        }
+
         compilations.all {
             compilerOptions.configure {
                 jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
@@ -275,15 +313,9 @@ android {
     //   - libonnxruntime.so - ONNX Runtime
     //   - libsherpa-onnx-*.so - Sherpa ONNX (STT/TTS/VAD)
     // ==========================================================================
-    sourceSets {
-        getByName("main") {
-            // IMPORTANT: Use only ONE jniLibs directory to avoid duplicates
-            // Clear any default directories and set only the one we want
-            jniLibs.setSrcDirs(
-                listOf(if (testLocal) "src/androidMain/jniLibs" else "build/jniLibs"),
-            )
-        }
-    }
+    // JNI libs are placed in src/androidMain/jniLibs/ (standard KMP location)
+    // This is automatically included by the KMP Android plugin
+    // ==========================================================================
 
     // Prevent packaging duplicates
     packaging {
@@ -297,9 +329,15 @@ android {
 // =============================================================================
 // Local JNI Build Task (for testLocal=true mode)
 // =============================================================================
-// Runs scripts/build-local.sh to build native libraries from source when testLocal=true.
-// This mirrors the Swift SDK's testLocal pattern.
-// ALWAYS cleans and rebuilds to ensure fresh libraries are used.
+// Smart build task that:
+// - Skips rebuild if JNI libs exist and C++ source hasn't changed
+// - Forces rebuild if rebuildCommons=true
+// - Uses build-kotlin.sh --setup for first-time setup
+// - Uses build-local.sh for subsequent builds
+//
+// Usage:
+//   ./gradlew buildLocalJniLibs                              # Build if needed
+//   ./gradlew buildLocalJniLibs -Prunanywhere.rebuildCommons=true  # Force rebuild
 // =============================================================================
 tasks.register<Exec>("buildLocalJniLibs") {
     group = "runanywhere"
@@ -308,14 +346,14 @@ tasks.register<Exec>("buildLocalJniLibs") {
     val jniLibsDir = file("src/androidMain/jniLibs")
     val llamaCppJniLibsDir = file("modules/runanywhere-core-llamacpp/src/androidMain/jniLibs")
     val onnxJniLibsDir = file("modules/runanywhere-core-onnx/src/androidMain/jniLibs")
-    val buildScript = file("scripts/build-local.sh")
+    val buildMarker = file(".commons-build-marker")
+    val buildKotlinScript = file("scripts/build-kotlin.sh")
+    val buildLocalScript = file("scripts/build-local.sh")
 
     // Only enable this task when testLocal=true
     onlyIf { testLocal }
 
     workingDir = projectDir
-    // Pass --clean flag to ensure fresh build every time
-    commandLine("bash", buildScript.absolutePath, "--clean")
 
     // Set environment
     environment(
@@ -326,39 +364,47 @@ tasks.register<Exec>("buildLocalJniLibs") {
     doFirst {
         logger.lifecycle("")
         logger.lifecycle("═══════════════════════════════════════════════════════════════")
-        logger.lifecycle(" Building JNI libraries locally (testLocal=true)")
+        logger.lifecycle(" RunAnywhere JNI Libraries (testLocal=true)")
         logger.lifecycle("═══════════════════════════════════════════════════════════════")
         logger.lifecycle("")
 
-        // Clean old JNI libraries before building
-        logger.lifecycle("🧹 Cleaning old JNI libraries...")
-        if (jniLibsDir.exists()) {
-            jniLibsDir.deleteRecursively()
-            logger.lifecycle("  Deleted: $jniLibsDir")
-        }
-        if (llamaCppJniLibsDir.exists()) {
-            llamaCppJniLibsDir.deleteRecursively()
-            logger.lifecycle("  Deleted: $llamaCppJniLibsDir")
-        }
-        if (onnxJniLibsDir.exists()) {
-            onnxJniLibsDir.deleteRecursively()
-            logger.lifecycle("  Deleted: $onnxJniLibsDir")
-        }
+        // Check if we have existing libs
+        val hasMainLibs = jniLibsDir.resolve("arm64-v8a/libc++_shared.so").exists()
+        val hasLlamaCppLibs = llamaCppJniLibsDir.resolve("arm64-v8a/librac_backend_llamacpp_jni.so").exists()
+        val hasOnnxLibs = onnxJniLibsDir.resolve("arm64-v8a/librac_backend_onnx_jni.so").exists()
+        val allLibsExist = hasMainLibs && hasLlamaCppLibs && hasOnnxLibs
 
-        logger.lifecycle("")
-        logger.lifecycle("🔨 Building fresh JNI libraries...")
-        logger.lifecycle("This may take several minutes...")
-        logger.lifecycle("")
+        if (allLibsExist && !rebuildCommons) {
+            logger.lifecycle("✅ JNI libraries already exist - skipping build")
+            logger.lifecycle("   (use -Prunanywhere.rebuildCommons=true to force rebuild)")
+            logger.lifecycle("")
+            // Skip the exec by setting a dummy command
+            commandLine("echo", "JNI libs up to date")
+        } else if (!allLibsExist) {
+            // First time setup - use build-kotlin.sh --setup
+            logger.lifecycle("🆕 First-time setup: Running build-kotlin.sh --setup")
+            logger.lifecycle("   This will download dependencies and build everything...")
+            logger.lifecycle("")
+            commandLine("bash", buildKotlinScript.absolutePath, "--setup", "--skip-build")
+        } else if (rebuildCommons) {
+            // Force rebuild - use build-kotlin.sh with --rebuild-commons
+            logger.lifecycle("🔄 Rebuild requested: Running build-kotlin.sh --rebuild-commons")
+            logger.lifecycle("")
+            commandLine("bash", buildKotlinScript.absolutePath, "--local", "--rebuild-commons", "--skip-build")
+        }
     }
 
     doLast {
         // Verify the build succeeded for all modules
         fun countLibs(dir: java.io.File, moduleName: String): Int {
+            if (!dir.exists()) return 0
             val soFiles = dir.walkTopDown().filter { it.extension == "so" }.toList()
-            logger.lifecycle("")
-            logger.lifecycle("✓ $moduleName: ${soFiles.size} .so files")
-            soFiles.groupBy { it.parentFile.name }.forEach { (abi, files) ->
-                logger.lifecycle("  $abi: ${files.map { it.name }.joinToString(", ")}")
+            if (soFiles.isNotEmpty()) {
+                logger.lifecycle("")
+                logger.lifecycle("✓ $moduleName: ${soFiles.size} .so files")
+                soFiles.groupBy { it.parentFile.name }.forEach { (abi, files) ->
+                    logger.lifecycle("  $abi: ${files.map { it.name }.joinToString(", ")}")
+                }
             }
             return soFiles.size
         }
@@ -367,12 +413,92 @@ tasks.register<Exec>("buildLocalJniLibs") {
         val llamaCppCount = countLibs(llamaCppJniLibsDir, "LlamaCPP Module")
         val onnxCount = countLibs(onnxJniLibsDir, "ONNX Module")
 
-        if (mainCount == 0) {
-            throw GradleException("Local JNI build failed: No .so files found in $jniLibsDir")
+        if (mainCount == 0 && testLocal) {
+            throw GradleException(
+                """
+                Local JNI build failed: No .so files found in $jniLibsDir
+
+                Run first-time setup:
+                  ./scripts/build-kotlin.sh --setup
+
+                Or download from releases:
+                  ./gradlew -Prunanywhere.testLocal=false assembleDebug
+                """.trimIndent()
+            )
         }
 
+        if (mainCount > 0) {
+            logger.lifecycle("")
+            logger.lifecycle("═══════════════════════════════════════════════════════════════")
+            logger.lifecycle(" Total: ${mainCount + llamaCppCount + onnxCount} native libraries")
+            logger.lifecycle("═══════════════════════════════════════════════════════════════")
+        }
+    }
+}
+
+// =============================================================================
+// Setup Task - First-time local development setup
+// =============================================================================
+// Convenience task for first-time setup. Equivalent to:
+//   ./scripts/build-kotlin.sh --setup
+// =============================================================================
+tasks.register<Exec>("setupLocalDevelopment") {
+    group = "runanywhere"
+    description = "First-time setup: download dependencies, build commons, copy JNI libs"
+
+    workingDir = projectDir
+    commandLine("bash", "scripts/build-kotlin.sh", "--setup", "--skip-build")
+
+    environment(
+        "ANDROID_NDK_HOME",
+        System.getenv("ANDROID_NDK_HOME") ?: "${System.getProperty("user.home")}/Library/Android/sdk/ndk/27.0.12077973",
+    )
+
+    doFirst {
         logger.lifecycle("")
-        logger.lifecycle("Total: ${mainCount + llamaCppCount + onnxCount} native libraries across all modules")
+        logger.lifecycle("═══════════════════════════════════════════════════════════════")
+        logger.lifecycle(" RunAnywhere SDK - First-Time Local Development Setup")
+        logger.lifecycle("═══════════════════════════════════════════════════════════════")
+        logger.lifecycle("")
+        logger.lifecycle("This will:")
+        logger.lifecycle("  1. Download dependencies (Sherpa-ONNX, etc.)")
+        logger.lifecycle("  2. Build runanywhere-commons for Android")
+        logger.lifecycle("  3. Copy JNI libraries to module directories")
+        logger.lifecycle("  4. Set testLocal=true in gradle.properties")
+        logger.lifecycle("")
+        logger.lifecycle("This may take 10-15 minutes on first run...")
+        logger.lifecycle("")
+    }
+
+    doLast {
+        logger.lifecycle("")
+        logger.lifecycle("✅ Setup complete! You can now build with:")
+        logger.lifecycle("   ./gradlew assembleDebug")
+        logger.lifecycle("")
+    }
+}
+
+// =============================================================================
+// Rebuild Commons Task - For when C++ code changes
+// =============================================================================
+tasks.register<Exec>("rebuildCommons") {
+    group = "runanywhere"
+    description = "Rebuild runanywhere-commons C++ code (use after making C++ changes)"
+
+    workingDir = projectDir
+    commandLine("bash", "scripts/build-kotlin.sh", "--local", "--rebuild-commons", "--skip-build")
+
+    environment(
+        "ANDROID_NDK_HOME",
+        System.getenv("ANDROID_NDK_HOME") ?: "${System.getProperty("user.home")}/Library/Android/sdk/ndk/27.0.12077973",
+    )
+
+    doFirst {
+        logger.lifecycle("")
+        logger.lifecycle("═══════════════════════════════════════════════════════════════")
+        logger.lifecycle(" Rebuilding runanywhere-commons C++ code")
+        logger.lifecycle("═══════════════════════════════════════════════════════════════")
+        logger.lifecycle("")
     }
 }
 
@@ -383,7 +509,7 @@ tasks.register<Exec>("buildLocalJniLibs") {
 //   - Commons: https://github.com/RunanywhereAI/runanywhere-sdks/releases/tag/commons-v{version}
 //     - librac_commons.so - RAC Commons infrastructure
 //     - librac_commons_jni.so - RAC Commons JNI bridge
-//   - Core backends: https://github.com/RunanywhereAI/runanywhere-binaries/releases/tag/core-v{version}
+//   - Core backends: https://github.com/RunanywhereAI/runanywhere-sdks/releases/tag/core-v{version}
 //     - librac_backend_llamacpp_jni.so - LLM inference (llama.cpp)
 //     - librac_backend_onnx_jni.so - STT/TTS/VAD (Sherpa ONNX)
 //     - libonnxruntime.so - ONNX Runtime
@@ -397,23 +523,24 @@ tasks.register("downloadJniLibs") {
     // Only run when NOT using local libs
     onlyIf { !testLocal }
 
-    val outputDir = file("build/jniLibs")
+    // Use standard KMP location for jniLibs
+    val outputDir = file("src/androidMain/jniLibs")
     val tempDir = file("${layout.buildDirectory.get()}/jni-temp")
 
-    // GitHub release URLs
-    val binariesBaseUrl = "https://github.com/RunanywhereAI/runanywhere-binaries/releases/download/core-v$coreVersion"
-    val commonsBaseUrl = "https://github.com/RunanywhereAI/runanywhere-sdks/releases/download/commons-v$commonsVersion"
+    // GitHub unified release URL - all assets are in one release
+    // Format: https://github.com/RunanywhereAI/runanywhere-sdks/releases/download/v{version}/{asset}
+    val releaseBaseUrl = "https://github.com/RunanywhereAI/runanywhere-sdks/releases/download/v$nativeLibVersion"
 
-    // Packages to download - ORDER MATTERS: Commons first, then backends
-    val packages =
-        listOf(
-            // Commons (RAC infrastructure - must be downloaded first)
-            "$commonsBaseUrl/RACommons-android-v$commonsVersion.zip",
-            // LlamaCPP backend (LLM inference)
-            "$binariesBaseUrl/RABackendLlamaCPP-android-v$coreVersion.zip",
-            // ONNX backend (STT/TTS/VAD)
-            "$binariesBaseUrl/RABackendONNX-android-v$coreVersion.zip",
-        )
+    // ABIs to download - arm64-v8a covers ~85% of devices
+    // Add more ABIs here if needed: "armeabi-v7a", "x86_64"
+    val targetAbis = listOf("arm64-v8a", "armeabi-v7a", "x86_64")
+
+    // Package types to download for each ABI
+    val packageTypes = listOf(
+        "RACommons-android",      // Core infrastructure + JNI bridge
+        "RABackendLLAMACPP-android", // LLM inference (llama.cpp)
+        "RABackendONNX-android"   // STT/TTS/VAD (Sherpa ONNX)
+    )
 
     outputs.dir(outputDir)
 
@@ -423,7 +550,14 @@ tasks.register("downloadJniLibs") {
             return@doLast
         }
 
-        // Clean output directories
+        // Check if libs already exist (CI pre-populates build/jniLibs/)
+        val existingLibs = outputDir.walkTopDown().filter { it.extension == "so" }.count()
+        if (existingLibs > 0) {
+            logger.lifecycle("Skipping JNI download: $existingLibs .so files already in $outputDir (CI mode)")
+            return@doLast
+        }
+
+        // Clean output directories (only if empty)
         outputDir.deleteRecursively()
         tempDir.deleteRecursively()
         outputDir.mkdirs()
@@ -434,60 +568,56 @@ tasks.register("downloadJniLibs") {
         logger.lifecycle(" Downloading JNI libraries (testLocal=false)")
         logger.lifecycle("═══════════════════════════════════════════════════════════════")
         logger.lifecycle("")
-        logger.lifecycle("Core version: $coreVersion")
-        logger.lifecycle("Commons version: $commonsVersion")
+        logger.lifecycle("Native lib version: v$nativeLibVersion")
+        logger.lifecycle("Target ABIs: ${targetAbis.joinToString(", ")}")
         logger.lifecycle("")
 
         var totalDownloaded = 0
 
-        packages.forEach { zipUrl ->
-            val packageName = zipUrl.substringAfterLast("/")
-            val tempZip = file("$tempDir/$packageName")
+        targetAbis.forEach { abi ->
+            val abiOutputDir = file("$outputDir/$abi")
+            abiOutputDir.mkdirs()
 
-            logger.lifecycle("▶ Downloading: $packageName")
-            logger.lifecycle("  URL: $zipUrl")
+            packageTypes.forEach { packageType ->
+                // Asset naming: {PackageType}-{abi}-v{version}.zip
+                val packageName = "$packageType-$abi-v$nativeLibVersion.zip"
+                val zipUrl = "$releaseBaseUrl/$packageName"
+                val tempZip = file("$tempDir/$packageName")
 
-            try {
-                // Download the zip
-                ant.withGroovyBuilder {
-                    "get"("src" to zipUrl, "dest" to tempZip, "verbose" to false)
-                }
+                logger.lifecycle("▶ Downloading: $packageName")
 
-                // Extract to temp directory
-                val extractDir = file("$tempDir/extracted-${packageName.replace(".zip", "")}")
-                extractDir.mkdirs()
-                ant.withGroovyBuilder {
-                    "unzip"("src" to tempZip, "dest" to extractDir)
-                }
+                try {
+                    // Download the zip
+                    ant.withGroovyBuilder {
+                        "get"("src" to zipUrl, "dest" to tempZip, "verbose" to false)
+                    }
 
-                // Copy all .so files from ABI directories
-                extractDir
-                    .walkTopDown()
-                    .filter { it.isDirectory && it.name in listOf("arm64-v8a", "armeabi-v7a", "x86_64", "x86") }
-                    .forEach { abiDir ->
-                        val targetAbiDir = file("$outputDir/${abiDir.name}")
-                        targetAbiDir.mkdirs()
+                    // Extract to temp directory
+                    val extractDir = file("$tempDir/extracted-${packageName.replace(".zip", "")}")
+                    extractDir.mkdirs()
+                    ant.withGroovyBuilder {
+                        "unzip"("src" to tempZip, "dest" to extractDir)
+                    }
 
-                        abiDir.listFiles()?.filter { it.extension == "so" }?.forEach { soFile ->
-                            val targetFile = file("$targetAbiDir/${soFile.name}")
+                    // Copy all .so files (they may be in subdirectories like jni/, onnx/, llamacpp/)
+                    extractDir.walkTopDown()
+                        .filter { it.extension == "so" }
+                        .forEach { soFile ->
+                            val targetFile = file("$abiOutputDir/${soFile.name}")
                             if (!targetFile.exists()) {
                                 soFile.copyTo(targetFile, overwrite = true)
-                                logger.lifecycle("    ✓ ${abiDir.name}/${soFile.name}")
+                                logger.lifecycle("  ✓ ${soFile.name}")
                                 totalDownloaded++
                             }
                         }
-                    }
 
-                // Clean up temp zip
-                tempZip.delete()
-
-                logger.lifecycle("  ✓ $packageName extracted")
-                logger.lifecycle("")
-            } catch (e: Exception) {
-                logger.warn("  ⚠ Failed to download $packageName: ${e.message}")
-                logger.warn("    URL: $zipUrl")
-                logger.lifecycle("")
+                    // Clean up temp zip
+                    tempZip.delete()
+                } catch (e: Exception) {
+                    logger.warn("  ⚠ Failed to download $packageName: ${e.message}")
+                }
             }
+            logger.lifecycle("")
         }
 
         // Clean up temp directory
@@ -502,7 +632,6 @@ tasks.register("downloadJniLibs") {
         logger.lifecycle("  ABIs: ${abiDirs.joinToString(", ")}")
         logger.lifecycle("  Output: $outputDir")
         logger.lifecycle("═══════════════════════════════════════════════════════════════")
-        logger.lifecycle("")
 
         // List libraries per ABI
         abiDirs.forEach { abi ->
@@ -541,18 +670,50 @@ tasks.named<Jar>("jvmJar") {
     }
 }
 
-// Configure publishing to include license acknowledgments
+// =============================================================================
+// Maven Central Publishing Configuration
+// =============================================================================
+// Consumer usage (after publishing):
+//   implementation("com.runanywhere:runanywhere-sdk:1.0.0")
+// =============================================================================
+
+// Get publishing credentials from environment or gradle.properties
+val mavenCentralUsername: String? = System.getenv("MAVEN_CENTRAL_USERNAME")
+    ?: project.findProperty("mavenCentral.username") as String?
+val mavenCentralPassword: String? = System.getenv("MAVEN_CENTRAL_PASSWORD")
+    ?: project.findProperty("mavenCentral.password") as String?
+
+// GPG signing configuration
+val signingKeyId: String? = System.getenv("GPG_KEY_ID")
+    ?: project.findProperty("signing.keyId") as String?
+val signingPassword: String? = System.getenv("GPG_SIGNING_PASSWORD")
+    ?: project.findProperty("signing.password") as String?
+val signingKey: String? = System.getenv("GPG_SIGNING_KEY")
+    ?: project.findProperty("signing.key") as String?
+
 publishing {
     publications.withType<MavenPublication> {
+        // Artifact naming for Maven Central
+        // Main artifact: com.runanywhere:runanywhere-sdk:1.0.0
+        artifactId = when (name) {
+            "kotlinMultiplatform" -> "runanywhere-sdk"
+            "androidRelease" -> "runanywhere-sdk-android"
+            "jvm" -> "runanywhere-sdk-jvm"
+            else -> "runanywhere-sdk-$name"
+        }
+
+        // POM metadata (required by Maven Central)
         pom {
-            name.set("RunAnywhere Kotlin SDK")
-            description.set("Privacy-first, on-device AI SDK for Kotlin/JVM and Android")
-            url.set("https://github.com/RunanywhereAI/runanywhere-sdks")
+            name.set("RunAnywhere SDK")
+            description.set("Privacy-first, on-device AI SDK for Kotlin/JVM and Android. Includes core infrastructure and common native libraries.")
+            url.set("https://runanywhere.ai")
+            inceptionYear.set("2024")
 
             licenses {
                 license {
                     name.set("The Apache License, Version 2.0")
-                    url.set("http://www.apache.org/licenses/LICENSE-2.0.txt")
+                    url.set("https://www.apache.org/licenses/LICENSE-2.0.txt")
+                    distribution.set("repo")
                 }
             }
 
@@ -561,6 +722,8 @@ publishing {
                     id.set("runanywhere")
                     name.set("RunAnywhere Team")
                     email.set("founders@runanywhere.ai")
+                    organization.set("RunAnywhere AI")
+                    organizationUrl.set("https://runanywhere.ai")
                 }
             }
 
@@ -569,11 +732,36 @@ publishing {
                 developerConnection.set("scm:git:ssh://github.com/RunanywhereAI/runanywhere-sdks.git")
                 url.set("https://github.com/RunanywhereAI/runanywhere-sdks")
             }
+
+            issueManagement {
+                system.set("GitHub Issues")
+                url.set("https://github.com/RunanywhereAI/runanywhere-sdks/issues")
+            }
         }
     }
 
-    // GitHub Packages repository configuration
     repositories {
+        // Maven Central (Sonatype Central Portal - new API)
+        maven {
+            name = "MavenCentral"
+            url = uri("https://ossrh-staging-api.central.sonatype.com/service/local/staging/deploy/maven2/")
+            credentials {
+                username = mavenCentralUsername
+                password = mavenCentralPassword
+            }
+        }
+
+        // Sonatype Snapshots (Central Portal)
+        maven {
+            name = "SonatypeSnapshots"
+            url = uri("https://central.sonatype.com/repository/maven-snapshots/")
+            credentials {
+                username = mavenCentralUsername
+                password = mavenCentralPassword
+            }
+        }
+
+        // GitHub Packages (backup/alternative)
         maven {
             name = "GitHubPackages"
             url = uri("https://maven.pkg.github.com/RunanywhereAI/runanywhere-sdks")
@@ -582,5 +770,36 @@ publishing {
                 password = project.findProperty("gpr.token") as String? ?: System.getenv("GITHUB_TOKEN")
             }
         }
+    }
+}
+
+// Configure signing (required for Maven Central)
+signing {
+    // Use in-memory key if provided via environment, otherwise use system GPG
+    if (signingKey != null && signingKey.contains("BEGIN PGP")) {
+        useInMemoryPgpKeys(signingKeyId, signingKey, signingPassword)
+    } else {
+        // Use system GPG (configured via gradle.properties)
+        useGpgCmd()
+    }
+    // Sign all publications
+    sign(publishing.publications)
+}
+
+// Only sign when publishing to Maven Central (not for local builds)
+tasks.withType<Sign>().configureEach {
+    onlyIf {
+        gradle.taskGraph.hasTask(":publishAllPublicationsToMavenCentralRepository") ||
+        gradle.taskGraph.hasTask(":publish") ||
+        project.hasProperty("signing.gnupg.keyName") ||
+        signingKey != null
+    }
+}
+
+// Disable JVM and debug publications - only publish Android release and metadata
+tasks.withType<PublishToMavenRepository>().configureEach {
+    onlyIf {
+        val dominated = publication.name in listOf("jvm", "androidDebug")
+        !dominated
     }
 }
